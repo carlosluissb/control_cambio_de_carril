@@ -3,7 +3,8 @@ import rospy
 from prius_msgs.msg import Control
 from sensor_msgs.msg import Joy
 
-import sys
+
+import sys 
 sys.path.append("../../PathPlanning/CubicSpline/")
 
 import numpy as np
@@ -13,6 +14,131 @@ import scipy.linalg as la
 import pycubicspline as cubic_spline_planner
 import tf
 import roslib
+
+from nav_msgs.msg import Odometry, Path
+from sensor_msgs.msg import Joy
+from gazebo_msgs.msg import ModelStates
+from tf.transformations import euler_from_quaternion
+from geometry_msgs.msg import Quaternion, PoseStamped
+from ackermann_msgs.msg import AckermannDriveStamped
+import signal
+import sys
+
+
+
+
+class O2G:
+    def __init__(self):
+        self.sub = rospy.Subscriber("/base_pose_ground_truth", Odometry, self.callback)#/prius_grid
+        #self.steering_sub = rospy.Subscriber("/teb_local_planner/ackermann_command", AckermannDriveStamped, self.steering_callback)
+        self.steering_sub = rospy.Subscriber("/ackermann_cmd", AckermannDriveStamped, self.steering_callback)
+        self.pub_joy = rospy.Publisher('/joy', Joy, queue_size=1)
+        self.last_steering_diff = 0
+        self.steering = 0
+        self.speed = 0
+        self.controller_speed = 0
+        self.current_speed = 0
+        self.buttons = [0, 0, 0, 0]
+        self.last_x = 0
+        self.last_y = 0
+        self.last_heading = 0
+
+
+
+    def callback(self, message):
+
+        control = Joy()
+        angles = euler_from_quaternion([message.pose.pose.orientation.x, message.pose.pose.orientation.y, message.pose.pose.orientation.z, message.pose.pose.orientation.w])
+
+        current_speed = np.sqrt(np.square(message.twist.twist.linear.x) + np.square(message.twist.twist.linear.y))
+        velocidad = current_speed
+        self.current_speed = current_speed
+        speed_signal = (np.absolute(self.controller_speed) - current_speed)*3
+
+        if speed_signal > 0:
+            speed_signal = 1
+        if speed_signal < -0.9:
+            speed_signal = -0.9
+
+
+        if self.controller_speed > 0:
+            control.buttons = [1, 0, 0, 0]
+            if speed_signal > 0:
+                speed_signal = 1
+            if speed_signal < -0.9:
+                speed_signal = -0.9
+            steering = self.steering
+
+        elif self.controller_speed < 0:
+            control.buttons = [0, 0, 1, 0]
+            if speed_signal > 0:
+                speed_signal = 1
+            elif speed_signal < -0.9:
+                speed_signal = -0.9
+            else:
+                speed_signal = -1*speed_signal
+            steering =  -1*self.steering
+
+        elif self.controller_speed == 0:
+            speed_signal = -1
+            control.buttons = [0, 0, 0, 1]
+            steering = 0
+
+        self.speed = speed_signal
+        self.buttons = control.buttons
+        control.axes = [steering, 0, self.speed, 0, 0]
+        control.buttons = self.buttons
+        self.pub_joy.publish(control)
+
+        return velocidad 
+        '''
+        print(self.controller_speed)
+        print(self.speed)
+        print(self.current_speed)
+        print(self.steering)
+        print('-------')
+        '''
+      
+
+    def steering_callback(self, message):
+
+        self.steering = message.drive.steering_angle
+        control = Joy()
+
+#       self.steering = self.steering*180/3.1415/30
+        self.steering = self.steering
+        self.controller_speed = 7#message.drive.speed
+
+        if self.controller_speed > 0:
+            control.buttons = [1, 0, 0, 0]
+        elif self.controller_speed < 0:
+            control.buttons = [0, 0, 1, 0]
+        elif self.controller_speed == 0:
+            self.speed = -1
+            control.buttons = [0, 0, 0, 1]
+        self.buttons = control.buttons
+        control.axes = [self.steering, 0, self.speed, 0, 0]
+        self.pub_joy.publish(control)
+        print(self.controller_speed)
+        print(self.speed)
+        print(self.current_speed)
+        print(self.steering)
+        print('-------')
+
+    def signal_handler(self, signal, frame):
+        control = Joy()
+        control.axes = [0, 0, 0, 0, 0]
+        control.buttons = [0, 0, 0, 1]
+        self.pub_joy.publish(control)
+        print('Pressed Ctrl+C')
+        sys.exit(0)
+
+
+
+
+
+
+o2g = O2G()
 
 rospy.init_node('pius_arrow_controller')
 
@@ -27,7 +153,7 @@ R = np.eye(2)
 
 # parameters
 dt = 0.01  # time tick[s]
-L = 0.5  # Wheel base of the vehicle [m]
+L = 2.7  # Wheel base of the vehicle [m]
 max_steer = math.radians(30.0)  # maximum steering angle[rad]
 
 show_animation = True
@@ -51,6 +177,7 @@ class State:
 
 def update(state, a, delta, angle_yaw, trans, vel):
 
+    delta = 0.3*delta
     if delta >= max_steer:
         delta = max_steer
     if delta <= - max_steer:
@@ -63,7 +190,11 @@ def update(state, a, delta, angle_yaw, trans, vel):
     state.x = trans[0]
     state.y = trans[1]
     state.yaw = angle_yaw
-    state.v = math.sqrt(vel[0]*vel[0]+vel[1]*vel[1])
+    
+    msg = Odometry()
+    
+    state.v = o2g.current_speed
+    print(state.v)
     #print(math.sqrt(vel[0]*vel[0]+vel[1]*vel[1]))
 
     return state
@@ -113,7 +244,7 @@ def dlqr(A, B, Q, R):
 def lqr_steering_control(state, cx, cy, cyaw, ck, pe, pth_e, sp):
     ind, e = calc_nearest_index(state, cx, cy, cyaw)
 
-    tv = sp[ind]
+    tv = 6
 
     k = ck[ind]
     v = state.v
@@ -182,8 +313,8 @@ def calc_nearest_index(state, cx, cy, cyaw):
 
 def closed_loop_prediction(cx, cy, cyaw, ck, speed_profile, goal):
     T = 500.0  # max simulation time
-    goal_dis = 1.0
-    stop_speed = 0.6
+    goal_dis = 0.8
+    stop_speed = 2
     trans = [0, 0] 
     while trans[0] == 0:
         if not rospy.is_shutdown():
@@ -204,32 +335,43 @@ def closed_loop_prediction(cx, cy, cyaw, ck, speed_profile, goal):
     v = [state.v]
     t = [0.0]
     target_ind = calc_nearest_index(state, cx, cy, cyaw)
-    delt = [0, 0, 0]
+    delt = [0]
 
     e, e_th = 0.0, 0.0
     
+    ai_max = 0 
+    ai_min = 0
     i = 0
     while T >= time and not rospy.is_shutdown():
         dl, target_ind, e, e_th, ai = lqr_steering_control(
             state, cx, cy, cyaw, ck, e, e_th, speed_profile)
-     
+ 
+        if abs(state.v) <= stop_speed:
+            target_ind += 1
+
         #print(dl)
         if not rospy.is_shutdown():
             if ai >= 0:
-                command.throttle = ai/30
+                command.throttle = ai/2.6
                 command.shift_gears = Control.FORWARD
                 pub.publish(command)              
             else:
-                command.brake = (-1)*ai/30
+                command.brake = (-1)*ai/10
                 command.shift_gears = Control.NEUTRAL
                 pub.publish(command)
             try:
                 (trans, rot) = listener.lookupTransform("/map", "/chassis2", rospy.Time(0))
-                (vel, ang) = listener.lookupTwist("/map", "/chassis2", rospy.Time(0), rospy.Duration(0.001))
+                (vel, ang) = listener.lookupTwist("/map", "/chassis2", rospy.Time(0), rospy.Duration(1))
             except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
                 continue
         
+        if ai > ai_max:
+            ai_max = ai
+        if ai < ai_min:
+            ai_min = ai     
+
         angle_yaw = tf.transformations.euler_from_quaternion(rot)
+
 
         #print(ace_norm_prius)
         state = update(state, ai, dl, angle_yaw[2], trans, vel)
@@ -243,7 +385,7 @@ def closed_loop_prediction(cx, cy, cyaw, ck, speed_profile, goal):
 
         time = time + dt
 
-
+        #print(ai_max," ", ai_min," ", 3.6*math.sqrt(vel[0]*vel[0]+vel[1]*vel[1]+vel[2]*vel[2]))
         
         if target_ind % 1 == 0 and show_animation:
             plt.cla()
@@ -264,7 +406,7 @@ def closed_loop_prediction(cx, cy, cyaw, ck, speed_profile, goal):
             print("Goal")
             break
 
-           
+    #print(ai_max," ", ai_min," ", state.v)       
     return t, x, y, yaw, v, delt
 
 
@@ -307,7 +449,9 @@ def main():
     ay = []
     path = [[0,0],[1,0],[2,0],[3,0],[4,0],[5,0],[6,0],[7,0],[8,0],[9,0],[10,0],[10.7845909573000,0.0308266627000000],[11.5643446504000,0.123116594000000],[12.3344536386000,0.276300796000000],[13.0901699437000,0.489434837000000],[13.8268343237000,0.761204674900000],[14.5399049974000,1.08993475810000],[15.2249856472000,1.47359835650000],[15.8778525229000,1.90983005630000],[16.4944804833000,2.39594034400000],[17.0710678119000,2.92893218810000],[17.6040596560000,3.50551951670000],[18.0901699437000,4.12214747710000],[18.5264016435000,4.77501435280000],[18.9100652419000,5.46009500260000],[19.2387953251000,6.17316567630000],[19.5105651630000,6.90983005630000],[19.7236992040000,7.66554636140000],[19.8768834060000,8.43565534960000],[19.9691733373000,9.21540904270000],[20,10],[20,11],[20,12],[20,13],[20,14],[20,15],[20,16],[20,17],[20,18],[20,19],[20,20],[19.9691733373000,20.7845909573000],[19.8768834060000,21.5643446504000],[19.7236992040000,22.3344536386000],[19.5105651630000,23.0901699437000],[19.2387953251000,23.8268343237000],[18.9100652419000,24.5399049974000],[18.5264016435000,25.2249856472000],[18.0901699437000,25.8778525229000],[17.6040596560000,26.4944804833000],[17.0710678119000,27.0710678119000],[16.4944804833000,27.6040596560000],[15.8778525229000,28.0901699437000],[15.2249856472000,28.5264016435000],[14.5399049974000,28.9100652419000],[13.8268343237000,29.2387953251000],[13.0901699437000,29.5105651630000],[12.3344536386000,29.7236992040000],[11.5643446504000,29.8768834060000],[10.7845909573000,29.9691733373000],[10,30],[9,30],[8,30],[7,30],[6,30],[5,30],[4,30],[3,30],[2,30],[1,30],[0,30],[-0.784590957300000,29.9691733373000],[-1.56434465040000,29.8768834060000],[-2.33445363860000,29.7236992040000],[-3.09016994370000,29.5105651630000],[-3.82683432370000,29.2387953251000],[-4.53990499740000,28.9100652419000],[-5.22498564720000,28.5264016435000],[-5.87785252290000,28.0901699437000],[-6.49448048330000,27.6040596560000],[-7.07106781190000,27.0710678119000],[-7.60405965600000,26.4944804833000],[-8.09016994370000,25.8778525229000],[-8.52640164350000,25.2249856472000],[-8.91006524190000,24.5399049974000],[-9.23879532510000,23.8268343237000],[-9.51056516300000,23.0901699437000],[-9.72369920400000,22.3344536386000],[-9.87688340600000,21.5643446504000],[-9.96917333730000,20.7845909573000],[-10,20],[-10,19],[-10,18],[-10,17],[-10,16],[-10,15],[-10,14],[-10,13],[-10,12],[-10,11],[-10,10],[-9.96917333730000,9.21540904270000],[-9.87688340600000,8.43565534960000],[-9.72369920400000,7.66554636140000],[-9.51056516300000,6.90983005630000],[-9.23879532510000,6.17316567630000],[-8.91006524190000,5.46009500260000],[-8.52640164350000,4.77501435280000],[-8.09016994370000,4.12214747710000],[-7.60405965600000,3.50551951670000],[-7.07106781190000,2.92893218810000],[-6.49448048330000,2.39594034400000],[-5.87785252290000,1.90983005630000],[-5.22498564720000,1.47359835650000]]
     
+
     for i in range(len(path)):
+
         ax.append(path[i][0])
         ay.append(path[i][1])
     
@@ -351,11 +495,11 @@ def main():
         plt.ylabel("curvature [1/m]")
 
         flg, ax = plt.subplots(1)
-        plt.plot(s, delt, "-r", label="delta")
+        plt.plot(t, delt, "-r", label="delta")
         plt.grid(True)
         plt.legend()
-        plt.xlabel("line length[m]")
-        plt.ylabel("delta [1/m]")
+        plt.xlabel("time")
+        plt.ylabel("delta [angle_norm]")
 
         plt.show()
 

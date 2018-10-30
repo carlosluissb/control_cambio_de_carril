@@ -28,8 +28,8 @@ R = np.eye(1)
 
 # parameters
 dt = 0.1  # time tick[s]
-L = 0.5  # Wheel base of the vehicle [m]
-max_steer = np.deg2rad(45.0)  # maximum steering angle[rad]
+L = 2.7 # Wheel base of the vehicle [m]
+max_steer = np.deg2rad(30.0)  # maximum steering angle[rad]
 
 show_animation = True
 #  show_animation = False
@@ -45,6 +45,8 @@ class State:
 
 
 def update(state, a, delta, angle_yaw, trans, vel):
+
+    delta = 0.6*delta
 
     if delta >= max_steer:
         delta = max_steer
@@ -171,8 +173,8 @@ def calc_nearest_index(state, cx, cy, cyaw):
 
 def closed_loop_prediction(cx, cy, cyaw, ck, speed_profile, goal):
     T = 500.0  # max simulation time
-    goal_dis = 0.3
-    stop_speed = 0.05
+    goal_dis = 1.1
+    stop_speed = 1.5
     trans = [0, 0] 
     while trans[0] == 0:
         if not rospy.is_shutdown():
@@ -196,27 +198,48 @@ def closed_loop_prediction(cx, cy, cyaw, ck, speed_profile, goal):
 
     e, e_th = 0.0, 0.0
 
+    delt = [0]
+    ai = 0
+    ai_max = 0 
+    ai_min = 0
     while T >= time and not rospy.is_shutdown():
+        
+        if state.v < 2.8:
+            ai = 1
+        else:
+            #state.v = 2.8 
+            ai = 0         
+
         dl, target_ind, e, e_th = lqr_steering_control(
             state, cx, cy, cyaw, ck, e, e_th)
 
-        ai = PIDControl(speed_profile[target_ind], state.v)
-        
-
+        # ai = PIDControl(6, state.v)          
+       
         if abs(state.v) <= stop_speed:
             target_ind += 1
+        
         if not rospy.is_shutdown():
-            if ai >= 0:
-                command.throttle = ai/30
+            '''
+            if ai > 0:
+                command.throttle = ai
                 command.shift_gears = Control.FORWARD
                 pub.publish(command)              
             else:
-                command.brake = (-1)*ai/30
+                command.brake = (-1)*ai
+                command.shift_gears = Control.NEUTRAL
+                pub.publish(command)
+            '''
+            if ai == 1:
+                command.throttle = ai
+                command.shift_gears = Control.FORWARD
+                pub.publish(command)
+            else:                 
+                command.throttle = 0
                 command.shift_gears = Control.NEUTRAL
                 pub.publish(command)
             try:
                 (trans, rot) = listener.lookupTransform("/map", "/chassis2", rospy.Time(0))
-                (vel, ang) = listener.lookupTwist("/map", "/chassis2", rospy.Time(0), rospy.Duration(0.001))
+                (vel, ang) = listener.lookupTwist("/map", "/chassis2", rospy.Time(0), rospy.Duration(1))
             except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
                 continue
         
@@ -231,12 +254,19 @@ def closed_loop_prediction(cx, cy, cyaw, ck, speed_profile, goal):
         if math.sqrt(dx ** 2 + dy ** 2) <= goal_dis:
             print("Goal")
             break
+        if ai > ai_max:
+            ai_max = ai
+        if ai < ai_min:
+            ai_min = ai     
+        
+        time = time + dt    
 
         x.append(state.x)
         y.append(state.y)
         yaw.append(state.yaw)
         v.append(state.v)
         t.append(time)
+        delt.append(command.steer)
 
         if target_ind % 1 == 0 and show_animation:
             plt.cla()
@@ -248,8 +278,8 @@ def closed_loop_prediction(cx, cy, cyaw, ck, speed_profile, goal):
             plt.title("speed[km/h]:" + str(round(state.v * 3.6, 2)) +
                       ",target index:" + str(target_ind))
             plt.pause(0.0001)
-
-    return t, x, y, yaw, v
+    print(ai_max," ", ai_min)        
+    return t, x, y, yaw, v, delt
 
 
 def calc_speed_profile(cx, cy, cyaw, target_speed):
@@ -284,8 +314,14 @@ def calc_speed_profile(cx, cy, cyaw, target_speed):
 
 def main():
     print("LQR steering control tracking start!!")
-    ax = [0.0, 6.0, 12.5, 10.0, 7.5, 3.0, -1.0]
-    ay = [0.0, -3.0, -5.0, 6.5, 3.0, 5.0, -2.0]
+    '''
+    ax = [0.0, 10.0, 20.0, 30.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+    ay = [0.0, 0.0,  0.0,  0.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+    '''
+    '''
+    ax = [0.0, 10.0, 20.0, 30.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+    ay = [0.0, 0.0,  0.0,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    '''
     
     ax = []
     ay = []
@@ -294,6 +330,7 @@ def main():
     for i in range(len(path)):
         ax.append(path[i][0])
         ay.append(path[i][1])
+    
     goal = [ax[-1], ay[-1]]
 
     cx, cy, cyaw, ck, s = cubic_spline_planner.calc_spline_course(
@@ -302,7 +339,7 @@ def main():
 
     sp = calc_speed_profile(cx, cy, cyaw, target_speed)
 
-    t, x, y, yaw, v = closed_loop_prediction(cx, cy, cyaw, ck, sp, goal)
+    t, x, y, yaw, v, delt = closed_loop_prediction(cx, cy, cyaw, ck, sp, goal)
 
     if show_animation:
         plt.close()
@@ -329,6 +366,13 @@ def main():
         plt.legend()
         plt.xlabel("line length[m]")
         plt.ylabel("curvature [1/m]")
+
+        flg, ax = plt.subplots(1)
+        plt.plot(t, delt, "-r", label="delta")
+        plt.grid(True)
+        plt.legend()
+        plt.xlabel("time")
+        plt.ylabel("delta [angle_norm]")
 
         plt.show()
 
