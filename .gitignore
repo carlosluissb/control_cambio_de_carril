@@ -11,3 +11,7 @@ publicador_curva.py
 pycubicspline.py
 pycubicspline.pyc
 test_run.sh
+car_controller.py
+car_controller.pyc
+images/
+tests/
